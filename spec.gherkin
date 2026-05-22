@@ -1,0 +1,125 @@
+Feature: Calculator
+  A calculator module that performs basic arithmetic operations (add, subtract,
+  multiply, divide, exponentiate) on two numeric operands and returns the result,
+  raising appropriate exceptions for invalid inputs or illegal operations.
+
+  # ---------------------------------------------------------------------------
+  # HAPPY PATH SCENARIOS
+  # ---------------------------------------------------------------------------
+
+  Scenario: Add two positive integers
+    Given a calculator
+    When I calculate 7 + 3
+    Then the result should be 10
+
+  Scenario: Subtract a larger number from a smaller number
+    Given a calculator
+    When I calculate 4 - 9
+    Then the result should be -5
+
+  Scenario: Multiply two floating-point numbers
+    Given a calculator
+    When I calculate 2.5 * 4.0
+    Then the result should be 10.0
+
+  Scenario: Divide two integers producing an exact float
+    Given a calculator
+    When I calculate 7 / 2
+    Then the result should be 3.5
+
+  Scenario: Divide two integers producing a whole number
+    Given a calculator
+    When I calculate 8 / 2
+    Then the result should be 4
+
+  Scenario: Raise a number to a positive integer power
+    Given a calculator
+    When I calculate 3 ** 4
+    Then the result should be 81
+
+  Scenario: Add a positive and a negative number
+    Given a calculator
+    When I calculate 15 + -6
+    Then the result should be 9
+
+  # ---------------------------------------------------------------------------
+  # EDGE CASE SCENARIOS
+  # ---------------------------------------------------------------------------
+
+  Scenario: Add zero to a number
+    Given a calculator
+    When I calculate 42 + 0
+    Then the result should be 42
+
+  Scenario: Multiply any number by zero
+    Given a calculator
+    When I calculate 99 * 0
+    Then the result should be 0
+
+  Scenario: Raise a number to the power of zero
+    Given a calculator
+    When I calculate 7 ** 0
+    Then the result should be 1
+
+  Scenario: Raise zero to a positive power
+    Given a calculator
+    When I calculate 0 ** 5
+    Then the result should be 0
+
+  Scenario: Subtract a number from itself
+    Given a calculator
+    When I calculate 13 - 13
+    Then the result should be 0
+
+  Scenario: Divide a negative number by a positive number
+    Given a calculator
+    When I calculate -10 / 4
+    Then the result should be -2.5
+
+  Scenario: Multiply two negative numbers
+    Given a calculator
+    When I calculate -3 * -3
+    Then the result should be 9
+
+  Scenario: Add two floating-point numbers with precision
+    Given a calculator
+    When I calculate 0.1 + 0.2
+    Then the result should be approximately 0.3
+
+  # ---------------------------------------------------------------------------
+  # ERROR / EXCEPTION SCENARIOS
+  # ---------------------------------------------------------------------------
+
+  Scenario: Divide by zero raises an error
+    Given a calculator
+    When I attempt to calculate 10 / 0
+    Then a ZeroDivisionError should be raised
+    And the error message should contain "division by zero"
+
+  Scenario: Use an unsupported operator raises an error
+    Given a calculator
+    When I attempt to calculate 5 % 2 using the modulo operator
+    Then a ValueError should be raised
+    And the error message should contain "unsupported operator"
+
+  Scenario: Provide a non-numeric string as the first operand
+    Given a calculator
+    When I attempt to calculate "abc" + 5
+    Then a ValueError should be raised
+    And the error message should contain "invalid input"
+
+  Scenario: Provide a non-numeric string as the second operand
+    Given a calculator
+    When I attempt to calculate 5 + "xyz"
+    Then a ValueError should be raised
+    And the error message should contain "invalid input"
+
+  Scenario: Provide None as an operand
+    Given a calculator
+    When I attempt to calculate None + 3
+    Then a ValueError should be raised
+
+  Scenario: Omit the operator argument
+    Given a calculator
+    When I attempt to call calculate with operands 4 and 2 but no operator
+    Then a TypeError should be raised

@@ -524,7 +524,7 @@ def main() -> None:
     # ════════════════════════════════════════════════════════════════════════
     _pass_header(
         "Pass 1 — Test Generation"
-        "  [test-generation-agent / deepseek-v4-pro]  🔴 Red Phase"
+        "  [test-generation-agent / deepseek-v4-flash]  🔴 Red Phase"
     )
 
     # Derive test file name conventions by extension
@@ -570,7 +570,7 @@ def main() -> None:
     # ════════════════════════════════════════════════════════════════════════
     _pass_header(
         "Pass 2 — Core Implementation"
-        "  [core-implementation-agent / deepseek-v4-pro]  🟢 Green Phase"
+        "  [core-implementation-agent / deepseek-v4-flash]  🟢 Green Phase"
     )
 
     impl_prompt = (
@@ -636,7 +636,7 @@ def main() -> None:
     # ════════════════════════════════════════════════════════════════════════
     _pass_header(
         "Pass 3 — Documentation"
-        "  [documentation-agent / deepseek-v4-pro]"
+        "  [documentation-agent / deepseek-v4-flash]"
     )
 
     docs_prompt = (

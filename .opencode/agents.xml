@@ -28,11 +28,11 @@
   A scope element on each agent makes these boundaries machine-readable and
   auditable.
 
-  MODEL ROUTING  (all set to deepseek-v4-pro for local cost control)
+  MODEL ROUTING  (all set to deepseek-v4-flash for local cost control)
   ==================================================================
   The manifesto (§3.2) specifies per-pass model routing (Claude for architecture,
   GPT-4.5 for security, etc.).  During local iterative testing all passes are
-  pinned to openrouter/deepseek/deepseek-v4-pro.  Update individual agent slugs
+  pinned to openrouter/deepseek/deepseek-v4-flash.  Update individual agent slugs
   when moving to a production routing policy.
 
   AGENT ID TO FILE MAPPING
@@ -59,7 +59,7 @@
   <!-- ==================================================================== -->
   <agent id="pass-0-design-agent">
     <role>Design and Architecture Agent (Pass 0)</role>
-    <model>openrouter/deepseek/deepseek-v4-pro</model>
+    <model>openrouter/deepseek/deepseek-v4-flash</model>
     <pass number="0" phase="Design" />
 
     <directives>
@@ -135,7 +135,7 @@
   <!-- ==================================================================== -->
   <agent id="pass-1-contracts-agent">
     <role>Contracts and Interfaces Agent (Pass 1)</role>
-    <model>openrouter/deepseek/deepseek-v4-pro</model>
+    <model>openrouter/deepseek/deepseek-v4-flash</model>
     <pass number="1" phase="Contracts" />
 
     <directives>
@@ -201,7 +201,7 @@
   <!-- ==================================================================== -->
   <agent id="pass-2-test-generation-agent">
     <role>Test Generation Agent (Pass 2 — Red Phase)</role>
-    <model>openrouter/deepseek/deepseek-v4-pro</model>
+    <model>openrouter/deepseek/deepseek-v4-flash</model>
     <pass number="2" phase="Test Generation" />
 
     <directives>
@@ -257,7 +257,7 @@
   <!-- ==================================================================== -->
   <agent id="pass-3-core-impl-agent">
     <role>Core Implementation Agent (Pass 3 — Green Phase)</role>
-    <model>openrouter/deepseek/deepseek-v4-pro</model>
+    <model>openrouter/deepseek/deepseek-v4-flash</model>
     <pass number="3" phase="Core Implementation" />
 
     <directives>
@@ -316,7 +316,7 @@
   <!-- ==================================================================== -->
   <agent id="pass-4-refactor-agent">
     <role>Refactor and Optimisation Agent (Pass 4)</role>
-    <model>openrouter/deepseek/deepseek-v4-pro</model>
+    <model>openrouter/deepseek/deepseek-v4-flash</model>
     <pass number="4" phase="Refactor" />
 
     <directives>
@@ -404,7 +404,7 @@
   <!-- ==================================================================== -->
   <agent id="pass-5-security-agent">
     <role>Security Hardening Agent (Pass 5)</role>
-    <model>openrouter/deepseek/deepseek-v4-pro</model>
+    <model>openrouter/deepseek/deepseek-v4-flash</model>
     <pass number="5" phase="Security" />
 
     <directives>
@@ -517,7 +517,7 @@
   <!-- ==================================================================== -->
   <agent id="pass-6-observability-agent">
     <role>Observability and Logging Agent (Pass 6)</role>
-    <model>openrouter/deepseek/deepseek-v4-pro</model>
+    <model>openrouter/deepseek/deepseek-v4-flash</model>
     <pass number="6" phase="Observability" />
 
     <directives>
@@ -617,7 +617,7 @@
   <!-- ==================================================================== -->
   <agent id="pass-7-documentation-agent">
     <role>Documentation and Spec-Sync Agent (Pass 7)</role>
-    <model>openrouter/deepseek/deepseek-v4-pro</model>
+    <model>openrouter/deepseek/deepseek-v4-flash</model>
     <pass number="7" phase="Documentation" />
 
     <directives>

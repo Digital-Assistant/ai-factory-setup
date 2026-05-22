@@ -16,11 +16,11 @@ State machine overview
           → Adds Pydantic models / TypedDicts / interfaces to target file
           → git commit after completion
 
-  Pass 2  TDD Test Generation    (deepseek-v4-pro)   [Red Phase]
+  Pass 2  TDD Test Generation    (deepseek-v4-flash)   [Red Phase]
           → Creates test file from spec.gherkin; tests are EXPECTED to fail
           → git commit after completion
 
-  Pass 3  Core Implementation    (deepseek-v4-pro)   [Green Phase]
+  Pass 3  Core Implementation    (deepseek-v4-flash)   [Green Phase]
           → Writes logic to make Pass 2 tests pass
           → Self-correction loop (max 2 retries) if tests fail
           → git commit after tests pass
@@ -40,7 +40,7 @@ State machine overview
           → Self-correction loop (max 2 retries) if tests break
           → git commit after tests pass
 
-  Pass 7  Documentation          (deepseek-v4-pro)
+  Pass 7  Documentation          (deepseek-v4-flash)
           → JSDoc / Python docstrings, @see links to design.mmd
           → git commit after completion
 
@@ -655,8 +655,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "  0  Design        (claude-sonnet)      → design.mmd + spec.gherkin\n"
             "     [HUMAN-IN-THE-LOOP gate]\n"
             "  1  Contracts     (claude-3.7-sonnet)  → type stubs in target file\n"
-            "  2  Tests         (deepseek-v4-pro)    → test file  [Red Phase]\n"
-            "  3  Core Logic    (deepseek-v4-pro)    → implementation [Green Phase]\n"
+            "  2  Tests         (deepseek-v4-flash)    → test file  [Red Phase]\n"
+            "  3  Core Logic    (deepseek-v4-flash)    → implementation [Green Phase]\n"
             "     [self-correction loop: max 2 retries]\n"
             "  4  Refactor      (deepseek-coder-v4)  → complexity/DRY cleanup\n"
             "     [self-correction loop: max 2 retries]\n"
@@ -664,7 +664,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "     [self-correction loop: max 2 retries]\n"
             "  6  Observability (deepseek-coder-v4)  → logging + error classes\n"
             "     [self-correction loop: max 2 retries]\n"
-            "  7  Docs          (deepseek-v4-pro)    → docstrings + @see links\n\n"
+            "  7  Docs          (deepseek-v4-flash)    → docstrings + @see links\n\n"
             "  git commit fired after every pass (1-7)"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -878,7 +878,7 @@ def main() -> None:
     )
 
     # ════════════════════════════════════════════════════════════════════════
-    # PASS 2 — TDD Test Generation  (deepseek-v4-pro)  [Red Phase]
+    # PASS 2 — TDD Test Generation  (deepseek-v4-flash)  [Red Phase]
     #
     # Goal:
     #   Write a comprehensive, failing test suite derived from spec.gherkin
@@ -939,7 +939,7 @@ def main() -> None:
     )
 
     # ════════════════════════════════════════════════════════════════════════
-    # PASS 3 — Core Implementation  (deepseek-v4-pro)  [Green Phase]
+    # PASS 3 — Core Implementation  (deepseek-v4-flash)  [Green Phase]
     #
     # Goal:
     #   Write the algorithmic logic that makes the Pass 2 tests pass.
@@ -1125,7 +1125,7 @@ def main() -> None:
     )
 
     # ════════════════════════════════════════════════════════════════════════
-    # PASS 7 — Documentation  (deepseek-v4-pro)
+    # PASS 7 — Documentation  (deepseek-v4-flash)
     #
     # Goal:
     #   Add complete JSDoc / Python docstrings to the finalised implementation.

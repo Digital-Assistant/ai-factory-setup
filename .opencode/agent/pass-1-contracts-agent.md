@@ -7,7 +7,7 @@ description: >
   as stubs. These contracts are the API surface that all downstream passes are
   bound to honour. Use when the orchestrator invokes the contracts pass.
 mode: all
-model: openrouter/deepseek/deepseek-v4-pro
+model: openrouter/deepseek/deepseek-v4-flash
 permission:
   read: allow
   edit: allow

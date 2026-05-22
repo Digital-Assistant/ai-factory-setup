@@ -6,7 +6,7 @@ description: >
   Logic must not change. Use when the orchestrator invokes the documentation
   pass.
 mode: all
-model: openrouter/deepseek/deepseek-v4-pro
+model: openrouter/deepseek/deepseek-v4-flash
 permission:
   read: allow
   edit: allow

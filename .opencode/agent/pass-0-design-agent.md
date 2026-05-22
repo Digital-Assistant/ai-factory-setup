@@ -6,7 +6,7 @@ description: >
   truth that gate all subsequent code passes. Use when the orchestrator
   invokes the design pass.
 mode: all
-model: openrouter/deepseek/deepseek-v4-pro
+model: openrouter/deepseek/deepseek-v4-flash
 permission:
   read: allow
   edit: allow

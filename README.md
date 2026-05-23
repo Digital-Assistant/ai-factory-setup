@@ -39,15 +39,15 @@ Each guarded pass runs your local test suite and self-corrects (up to 2 retries)
 
 ```mermaid
 graph TD
-    classDef orchestrator fill:#1168bd,stroke:#0b4884,stroke-width:2px,color:#fff
-    classDef subAgent fill:#2dd4bf,stroke:#0f766e,stroke-width:2px,color:#000
-    classDef gate fill:#f59e0b,stroke:#b45309,stroke-width:2px,color:#000
-    classDef external fill:#999999,stroke:#666666,stroke-width:2px,color:#fff
+    classDef orchestrator fill:#1168bd,stroke:#0b4884,stroke-width:2px,color:#fff;
+    classDef subAgent fill:#2dd4bf,stroke:#0f766e,stroke-width:2px,color:#000;
+    classDef gate fill:#f59e0b,stroke:#b45309,stroke-width:2px,color:#000;
+    classDef external fill:#999999,stroke:#666666,stroke-width:2px,color:#fff;
 
-    Orchestrator["Pipeline Orchestrator<br>(pipeline_v3_1.py)"]:::orchestrator
-    SubAgent["Specialized Sub-Agent<br>(e.g., Security, Observability)"]:::subAgent
-    Gate{"Verification Gate<br>(local test suite)"}:::gate
-    Git[("Git Repository")]:::external
+    Orchestrator["Pipeline Orchestrator (pipeline_v3_1.py)"]:::orchestrator
+    SubAgent["Specialized Sub-Agent (e.g., Security, Observability)"]:::subAgent
+    Gate{"Verification Gate (local test suite)"}:::gate
+    Git["Git Repository"]:::external
 
     Orchestrator -->|Delegates scope & task| SubAgent
     SubAgent -->|Writes code / proposes edits| Gate

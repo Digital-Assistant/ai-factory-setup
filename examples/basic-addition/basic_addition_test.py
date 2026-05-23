@@ -1,8 +1,11 @@
-"""Unit tests for the sample_target arithmetic module.
+"""Unit tests for the basic_addition arithmetic module.
 
 These tests directly reflect the Scenarios defined in spec.gherkin and
 the architecture constraints in design.mmd. Each test is independent,
 deterministic, and idempotent — no shared mutable state is used.
+
+This is the verified integration example for the ai-factory-setup pipeline.
+Run with:  pytest examples/basic-addition/ -v
 """
 
 import math
@@ -15,16 +18,16 @@ import pytest
 from importlib import util as _import_util
 
 _spec = _import_util.spec_from_file_location(
-    "sample_target", __file__.rsplit("/", 1)[0] + "/sample_target.py"
+    "basic_addition", __file__.rsplit("/", 1)[0] + "/basic_addition.py"
 )
-_sample_target = _import_util.module_from_spec(_spec)
-_spec.loader.exec_module(_sample_target)
+_basic_addition = _import_util.module_from_spec(_spec)
+_spec.loader.exec_module(_basic_addition)
 
 # Convenience aliases to keep test bodies short and readable.
-add = _sample_target.add
-subtract = _sample_target.subtract
-multiply = _sample_target.multiply
-divide = _sample_target.divide
+add = _basic_addition.add
+subtract = _basic_addition.subtract
+multiply = _basic_addition.multiply
+divide = _basic_addition.divide
 
 
 # ---------------------------------------------------------------------------

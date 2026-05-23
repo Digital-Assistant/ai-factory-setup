@@ -1,0 +1,10 @@
+# Core runtime dependencies
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+litellm>=1.0.0
+
+# Test runner
+pytest>=8.0.0
+
+# Optional: for type checking during development
+# mypy>=1.0.0

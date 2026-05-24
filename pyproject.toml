@@ -1,0 +1,67 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# ---------------------------------------------------------------------------
+# Project metadata
+# ---------------------------------------------------------------------------
+[project]
+name = "agentic-tdd"
+version = "0.1.0"
+description = "Multi-Pass Agentic TDD Pipeline — 8-pass AI factory orchestrator"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+keywords = ["ai", "tdd", "agentic", "llm", "pipeline", "opencode"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Software Development :: Testing",
+]
+
+# Runtime dependencies (kept intentionally minimal — opencode is a separate CLI)
+dependencies = []
+
+# ---------------------------------------------------------------------------
+# Optional dependency groups
+# ---------------------------------------------------------------------------
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+# ---------------------------------------------------------------------------
+# CLI entrypoint
+#
+# Maps the shell command `agentic-tdd` to `agentic_tdd.cli:main`.
+# Install with:
+#   pipx install .        # globally, in an isolated virtualenv (recommended)
+#   pip install -e .      # editable dev install in the current virtualenv
+# ---------------------------------------------------------------------------
+[project.scripts]
+agentic-tdd = "agentic_tdd.cli:main"
+
+# ---------------------------------------------------------------------------
+# Package discovery
+#
+# hatchling looks for packages under `src/` by default when src-layout is
+# detected.  We declare it explicitly for clarity.
+# ---------------------------------------------------------------------------
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentic_tdd"]
+
+# ---------------------------------------------------------------------------
+# Project URLs
+# ---------------------------------------------------------------------------
+[project.urls]
+Homepage   = "https://github.com/Digital-Assistant/ai-factory-setup"
+Repository = "https://github.com/Digital-Assistant/ai-factory-setup"
+Issues     = "https://github.com/Digital-Assistant/ai-factory-setup/issues"

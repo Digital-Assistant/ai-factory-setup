@@ -1,51 +1,51 @@
 #!/usr/bin/env python3
 """
-pipeline_v3_1.py -- v0.3.1 AI Factory Pipeline Orchestrator
-============================================================
+agentic_tdd.cli -- v0.3.3 AI Factory Pipeline Orchestrator
+===========================================================
 
-Refactored from v0.3 to enforce three cost-critical invariants:
+Packaged as a globally-installable CLI tool: ``agentic-tdd``.
 
-  1.  "Static Prefix" (Maximize API Caching)
-      The top 70-90% of every CLI payload is bit-for-bit identical across
-      all 8 passes.  File attachment order is locked -- design.mmd,
-      spec.gherkin, then the target file -- so every pass shares the same
-      cacheable prefix and the orchestrator reclaims ~90% of input tokens
-      from the provider's prefix-cache pool.
+Install
+-------
+  pipx install .                  # globally, in isolation (recommended)
+  pip install -e .                # editable dev install
 
-  2.  "Context Compaction" (Eliminate LLM Attention Drift)
-      Each pass is a fresh `opencode run` invocation with no session
-      resuming.  "Memory" lives exclusively in the updated files on disk.
-      When a self-correction retry needs an error log, that log is passed
-      as a temporary --file argument (.opencode_error.log).  The moment
-      tests turn green the log is deleted so the next pass starts with a
-      clean, compacted context.
+Invoke
+------
+  agentic-tdd path/to/feature.md            # default: --source-type file
+  agentic-tdd path/to/src/calculator.py --source-type file
+  agentic-tdd "Add OAuth2 login" --source-type string    # (placeholder)
+  agentic-tdd https://github.com/org/repo/issues/42 --source-type github  # (placeholder)
 
-  3.  "Single-Model Lock" (Preserve Cache Pool)
-      All agents remain locked to deepseek-coder-v4 via their individual
-      agent YAML frontmatter.  The orchestrator never injects a model
-      override, so every call hits the same API cache pool.
+Changes from v0.3.1
+-------------------
+  - Moved into installable Python package ``agentic_tdd``
+  - Entrypoint: ``agentic_tdd.cli:main`` (mapped to ``agentic-tdd`` command)
+  - New positional argument ``input_source`` replaces ``target_file``
+  - New ``--source-type`` flag: file | string | github (extensible)
+  - All subprocess calls execute inside ``os.getcwd()`` (the caller's project
+    root), not the directory where the package is installed
+  - Logging, git-branching, and self-correction logic unchanged
 
-State machine overview (unchanged from v0.3)
---------------------------------------------
-  Pass 0  Design & Architecture  -> design.mmd + spec.gherkin  [+ HITL gate]
+Three cost-critical invariants (unchanged)
+------------------------------------------
+  1. "Static Prefix"     -- locked --file order maximises cache hits
+  2. "Context Compaction"-- error logs deleted the moment tests pass
+  3. "Single-Model Lock" -- model declared in agent YAML, never overridden
+
+State machine
+-------------
+  Pass 0  Design & Architecture  -> design.mmd + spec.gherkin  [HITL gate]
   Pass 1  Contracts & Types      -> type stubs in target file
-  Pass 2  TDD Test Generation    -> test file                  [Red Phase]
-  Pass 3  Core Implementation    -> logic                      [Green Phase + SC]
-  Pass 4  Refactor & Optimise    -> complexity/DRY             [SC]
-  Pass 5  Security Hardening     -> OWASP Top-10               [SC]
-  Pass 6  Observability & Logs   -> logging + error classes    [SC]
+  Pass 2  TDD Test Generation    -> test file                   [Red Phase]
+  Pass 3  Core Implementation    -> logic                       [Green Phase + SC]
+  Pass 4  Refactor & Optimise    -> complexity/DRY              [SC]
+  Pass 5  Security Hardening     -> OWASP Top-10                [SC]
+  Pass 6  Observability & Logs   -> logging + error classes     [SC]
   Pass 7  Documentation          -> docstrings + @see links
 
-  [SC] = Self-correction loop (max 2 retries, then abort)
+  [SC]   = Self-correction loop (max 2 retries, then abort)
   [HITL] = Human-in-the-Loop review gate
-
-Usage
------
-  python pipeline_v3_1.py <target_file> [options]
-
-  python pipeline_v3_1.py src/calculator.py
-  python pipeline_v3_1.py src/calculator.py --test-cmd "pytest src/ -x -v"
-  python pipeline_v3_1.py src/calculator.py --skip-hitl   # CI / automated use
 
 Prerequisites
 -------------
@@ -54,6 +54,8 @@ Prerequisites
   - Agent files present in .opencode/agent/
   - git initialised in the working directory
 """
+
+from __future__ import annotations
 
 import argparse
 import logging
@@ -69,7 +71,7 @@ from pathlib import Path
 # Constants
 # ---------------------------------------------------------------------------
 
-PIPELINE_VERSION = "0.3.1"
+PIPELINE_VERSION = "0.3.3"
 logger = logging.getLogger(__name__)
 
 OPENCODE_CMD = "opencode"
@@ -100,7 +102,6 @@ PASS_LABELS: dict[int, str] = {
 
 _W = 68
 
-
 # ---------------------------------------------------------------------------
 # Static Prefix -- Immutable File Ordering
 # ---------------------------------------------------------------------------
@@ -108,219 +109,89 @@ _W = 68
 # THE RULE: The `--file` arguments appended to every `opencode run` invocation
 # MUST appear in a hardcoded, unchanging sequence.  Never re-order them.
 #
-# Why?  LLM API providers (OpenRouter, Anthropic, OpenAI) implement
-# *prefix-level* KV-cache lookups.  If the first N tokens of a request are
-# byte-for-byte identical to a prior request, the provider serves those tokens
-# from cache --  zero compute cost, ~90% discount on input pricing.
-#
-# Our invariant:
-#   [agent system prompt] + [design.mmd] + [spec.gherkin] + [target file]
-#
-# The agent system prompt (the .md agent file loaded by `--agent`) never
-# changes between passes.  design.mmd and spec.gherkin are frozen after
-# Pass 0.  Together they form the "Static Prefix" that dominates every
-# payload -- typically 70-90% of the total input tokens.  By locking their
-# order we ensure every pass shares the identical prefix and reaps the
-# cache discount.
-#
-# File ordering matters:
-#   - design.mmd        -- FIRST, immutable architectural source of truth
-#   - spec.gherkin      -- SECOND, immutable behavioural specification
-#   - target source     -- THIRD, the file being modified (can change)
+# File ordering:
+#   - design.mmd          -- FIRST, immutable architectural source of truth
+#   - spec.gherkin        -- SECOND, immutable behavioural specification
+#   - target source       -- THIRD, the file being modified (can change)
 #   - .opencode_error.log -- OPTIONAL, only during self-correction retries
-#
-# The target file moves with each pass (it is being edited), so it sits
-# AFTER the static prefix.  The error log changes with every retry, so it
-# sits last.  The prompt (user-turn message) is always the final positional
-# argument -- it differs per pass and per retry, but because it comes *after*
-# the static prefix it never invalidates the cache.
 # ---------------------------------------------------------------------------
 
-# Canonical artefact filenames -- these names are hardcoded so the
-# orchestrator can always locate them in the artefact directory.
+# Canonical artefact filenames -- hardcoded so the orchestrator can always
+# locate them relative to the target file's directory.
 ARTEFACT_DESIGN = "design.mmd"
 ARTEFACT_GHERKIN = "spec.gherkin"
 
-# The error-log stub attached during self-correction retries.
-# Context Compaction ensures this file is deleted the moment tests pass,
-# so the next pipeline pass inherits no stale debugging context.
+# Disposable error log attached during self-correction retries.
+# Deleted immediately once tests pass (Context Compaction).
 ERROR_LOG_STUB = ".opencode_error.log"
 
 
-def build_opencode_command(
-    agent_name: str,
-    prompt: str,
-    target_file: Path,
-    artefact_dir: Path,
-    error_log: Path | None = None,
-) -> list[str]:
-    """Construct a strictly-ordered `opencode run` command list.
+# ---------------------------------------------------------------------------
+# Logging setup
+# ---------------------------------------------------------------------------
 
-    STATIC PREFIX (Prefix Anchoring)
-    --------------------------------
-    The --file arguments are appended in a HARDCODED, IMMUTABLE order
-    that never varies across passes:
+class _PipelineFormatter(logging.Formatter):
+    """INFO records are emitted raw (no timestamp/level prefix) so the
+    ASCII banner boxes are not polluted.  DEBUG/WARNING/ERROR records carry
+    the full structured prefix for diagnostics."""
 
-      1. design.mmd      -- static architectural artefact (cacheable)
-      2. spec.gherkin    -- static behavioural artefact (cacheable)
-      3. target_file     -- the source file being edited
-      4. error_log       -- temporary self-correction log (if present)
+    def format(self, record: logging.LogRecord) -> str:
+        if record.levelno == logging.INFO:
+            return record.getMessage()
+        return super().format(record)
 
-    The prompt (user-turn instruction) is always the terminal argument.
-    Because design.mmd + spec.gherkin sit at a fixed offset from the
-    start of the payload, their tokens are ALWAYS in the prefix-cache
-    hit zone across all 8 passes.
 
-    SINGLE-MODEL LOCK
-    -----------------
-    No --model override is ever injected.  The model is declared exclusively
-    in each agent's YAML frontmatter (.opencode/agent/<agent>.md).  This
-    preserves the cache pool because switching models (even from
-    deepseek-coder-v4 to a different variant) would fragment the cache
-    and waste the discount.
+def setup_logging(level_name: str) -> None:
+    """Configure the root pipeline logger.
 
-    Args:
-        agent_name:   Agent ID matching .opencode/agent/<id>.md
-        prompt:       The user-turn instruction (varies per pass/retry).
-        target_file:  Absolute path to the source file under modification.
-        artefact_dir: Directory containing design.mmd and spec.gherkin.
-        error_log:    Optional path to a self-correction failure log.
-                      See Context Compaction docs in
-                      run_pass_with_self_correction().
-
-    Returns:
-        A complete subprocess-ready command list.
+    Called once at startup after argparse resolves ``--log-level``.
+    Clears any existing handlers to stay idempotent on repeated calls
+    (e.g. during tests).
     """
-    cmd = [OPENCODE_CMD, "run", "--agent", agent_name]
-
-    # --- Static Prefix: artefact files in immutable order ---
-
-    # design.mmd is ALWAYS first.  It is the architectural source of truth
-    # and changes only if a human edits it at the HITL gate.  Its tokens
-    # sit at the earliest possible offset in the payload, maximising the
-    # prefix-cache overlap across all 8 passes.
-    design_path = artefact_dir / ARTEFACT_DESIGN
-    if design_path.is_file():
-        cmd += ["--file", str(design_path)]
-
-    # spec.gherkin is ALWAYS second.  Like design.mmd, it is frozen after
-    # Pass 0 and contributes to the immutable prefix.
-    gherkin_path = artefact_dir / ARTEFACT_GHERKIN
-    if gherkin_path.is_file():
-        cmd += ["--file", str(gherkin_path)]
-
-    # The target source file is attached THIRD.  Its content changes
-    # between passes (it's being iteratively improved), so it must not
-    # appear inside the cacheable prefix.  Placing it AFTER the static
-    # artefacts ensures the prefix stays clean.
-    cmd += ["--file", str(target_file)]
-
-    # --- Optional self-correction error log ---
-
-    # The error log is ONLY present during a self-correction retry.
-    # Its content differs every time (different failure signatures),
-    # so it is placed LAST among the --file arguments to avoid
-    # fragmenting the static prefix.  Context Compaction deletes this
-    # file the moment tests pass.
-    if error_log is not None and error_log.is_file():
-        cmd += ["--file", str(error_log)]
-
-    # --- Auto-approve permissions for deterministic file I/O ---
-    #
-    # --dangerously-skip-permissions allows the agent to read/write the
-    # attached files without interactive prompts.  All agents deny bash
-    # and webfetch in their frontmatter -- those restrictions are
-    # enforced regardless of this flag.
-    cmd.append("--dangerously-skip-permissions")
-
-    # --- The prompt is the terminal argument ---
-    #
-    # Putting the prompt LAST is intentional: it varies per pass and
-    # per retry, so it must come after the static prefix to avoid
-    # invalidating the cache.  The provider's prefix matcher scans
-    # from token 0; as long as the first N tokens are identical, the
-    # match succeeds regardless of what follows.
-    cmd.append(prompt)
-
-    return cmd
-
-
-# ---------------------------------------------------------------------------
-# Environment helpers
-# ---------------------------------------------------------------------------
-
-def load_dot_env(env_path: Path = Path(".env")) -> None:
-    """Parse a .env file and populate os.environ."""
-    if not env_path.is_file():
-        return
-
-    with env_path.open() as fh:
-        for raw in fh:
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, raw_value = line.partition("=")
-            clean_value = raw_value.split("#")[0].strip().strip("'\"")
-            os.environ.setdefault(key.strip(), clean_value)
-
-
-def preflight_checks(target: Path) -> None:
-    """Validate prerequisites before pipeline execution."""
-    if not target.is_file():
-        _die(f"Target file not found: '{target}'")
-
-    if not os.environ.get("OPENROUTER_API_KEY"):
-        _die(
-            "OPENROUTER_API_KEY is not set.\n"
-            "  Add it to your .env file:  OPENROUTER_API_KEY=sk-or-..."
+    level = getattr(logging, level_name.upper(), logging.INFO)
+    logger.setLevel(level)
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(
+        _PipelineFormatter(
+            "%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
         )
-
-    if not shutil.which(OPENCODE_CMD):
-        _die(
-            f"'{OPENCODE_CMD}' CLI not found on PATH.\n"
-            "  Install it with:  npm install -g opencode-ai"
-        )
+    )
+    if logger.hasHandlers():
+        logger.handlers.clear()
+    logger.addHandler(handler)
 
 
 # ---------------------------------------------------------------------------
 # Terminal output helpers
 # ---------------------------------------------------------------------------
 
-class PipelineFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        if record.levelno == logging.INFO:
-            return record.getMessage()
-        return super().format(record)
-
-def setup_logging(level_name: str) -> None:
-    level = getattr(logging, level_name.upper(), logging.INFO)
-    logger.setLevel(level)
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(PipelineFormatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
-    if logger.hasHandlers():
-        logger.handlers.clear()
-    logger.addHandler(handler)
-
-def _banner(target: Path, test_cmd: list[str], skip_hitl: bool) -> None:
-    """Print the v0.3.1 pipeline startup banner."""
+def _banner(target: Path, test_cmd: list[str], skip_hitl: bool, source_type: str) -> None:
+    """Print the pipeline startup banner."""
     logger.info("")
     logger.info("┌" + "─" * _W + "┐")
-    logger.info(f"│  ai-factory-setup  •  v{PIPELINE_VERSION} Pipeline  •  8-Pass State Machine"
-          + " " * (_W - 59) + "│")
+    logger.info(
+        f"│  agentic-tdd  •  v{PIPELINE_VERSION} Pipeline  •  8-Pass State Machine"
+        + " " * (_W - 57) + "│"
+    )
     logger.info("└" + "─" * _W + "┘")
     logger.info("")
-    logger.info(f"  Target     : {target}")
-    logger.info(f"  Test cmd   : {' '.join(test_cmd)}")
-    logger.info(f"  HITL gate  : {'disabled (--skip-hitl)' if skip_hitl else 'enabled'}")
-    logger.info(f"  Max retries: {MAX_CORRECTION_RETRIES} (per guarded pass)")
+    logger.info(f"  Input source : {target}")
+    logger.info(f"  Source type  : {source_type}")
+    logger.info(f"  Test cmd     : {' '.join(test_cmd)}")
+    logger.info(f"  HITL gate    : {'disabled (--skip-hitl)' if skip_hitl else 'enabled'}")
+    logger.info(f"  Max retries  : {MAX_CORRECTION_RETRIES} (per guarded pass)")
+    logger.info(f"  CWD          : {os.getcwd()}")
     logger.info("")
     logger.info("  Cache strategy: Static Prefix  +  Context Compaction")
     logger.info("")
     logger.info("  Pass schedule:")
     for num, label in PASS_LABELS.items():
-        gate = "  <- self-correction + git commit" if num in (3, 4, 5, 6) else \
-               "  <- git commit" if num in (1, 2, 7) else \
-               "  <- HITL gate"
+        gate = (
+            "  <- self-correction + git commit" if num in (3, 4, 5, 6) else
+            "  <- git commit"                   if num in (1, 2, 7)     else
+            "  <- HITL gate"
+        )
         logger.info(f"    {num}  {label:<36}{gate}")
     logger.info("")
 
@@ -351,9 +222,7 @@ def _warn(lines: list[str]) -> None:
 
 
 def _die(msg: str) -> None:
-    logger.error(f"
-[FATAL]  {msg}
-")
+    logger.error(f"\n[FATAL]  {msg}\n")
     sys.exit(1)
 
 
@@ -362,13 +231,121 @@ def _git_info(msg: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# OpenCode runner (simplified -- just executes a pre-built command)
+# OpenCode runner
 # ---------------------------------------------------------------------------
 
+def build_opencode_command(
+    agent_name: str,
+    prompt: str,
+    target_file: Path,
+    artefact_dir: Path,
+    error_log: Path | None = None,
+) -> list[str]:
+    """Construct a strictly-ordered ``opencode run`` command list.
+
+    Enforces the Static Prefix invariant: design.mmd → spec.gherkin →
+    target_file → error_log (optional) → prompt.  No argument is ever
+    re-ordered or overridden by this function.
+
+    Args:
+        agent_name:   Agent ID matching ``.opencode/agent/<id>.md``.
+        prompt:       User-turn instruction (varies per pass/retry).
+        target_file:  Absolute path to the source file under modification.
+        artefact_dir: Directory containing design.mmd and spec.gherkin.
+        error_log:    Optional path to a self-correction failure log.
+
+    Returns:
+        A complete subprocess-ready command list.
+    """
+    cmd = [OPENCODE_CMD, "run", "--agent", agent_name]
+
+    # Static Prefix — immutable order
+    design_path = artefact_dir / ARTEFACT_DESIGN
+    if design_path.is_file():
+        cmd += ["--file", str(design_path)]
+
+    gherkin_path = artefact_dir / ARTEFACT_GHERKIN
+    if gherkin_path.is_file():
+        cmd += ["--file", str(gherkin_path)]
+
+    cmd += ["--file", str(target_file)]
+
+    # Error log sits last — variable content, must not pollute the prefix
+    if error_log is not None and error_log.is_file():
+        cmd += ["--file", str(error_log)]
+
+    cmd.append("--dangerously-skip-permissions")
+    cmd.append(prompt)
+
+    return cmd
+
+
 def run_opencode(cmd: list[str]) -> None:
-    """Execute a pre-built opencode command, streaming output to the terminal."""
+    """Execute a pre-built opencode command, streaming output to the terminal.
+
+    Runs in the caller's CWD (``os.getcwd()``), which is the project root
+    where ``agentic-tdd`` was invoked — not the package installation directory.
+
+    Args:
+        cmd: Full subprocess command list from :func:`build_opencode_command`.
+
+    Raises:
+        subprocess.CalledProcessError: If opencode exits non-zero.
+    """
     logger.debug(f"Running opencode command: {shlex.join(cmd)}")
+    logger.debug(f"CWD for opencode: {os.getcwd()}")
     subprocess.run(cmd, check=True)
+
+
+# ---------------------------------------------------------------------------
+# Environment helpers
+# ---------------------------------------------------------------------------
+
+def load_dot_env(env_path: Path | None = None) -> None:
+    """Parse a .env file in the caller's CWD and populate os.environ.
+
+    Resolves relative to the caller's current working directory so that
+    the API key is picked up from the *project* being processed, not the
+    package installation directory.
+    """
+    if env_path is None:
+        env_path = Path(os.getcwd()) / ".env"
+
+    if not env_path.is_file():
+        logger.debug(f"No .env found at {env_path} — skipping")
+        return
+
+    logger.debug(f"Loading environment from {env_path}")
+    with env_path.open() as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, raw_value = line.partition("=")
+            clean_value = raw_value.split("#")[0].strip().strip("'\"")
+            os.environ.setdefault(key.strip(), clean_value)
+
+
+def preflight_checks(target: Path) -> None:
+    """Validate prerequisites before pipeline execution."""
+    logger.debug(f"Preflight check: target={target}")
+
+    if not target.is_file():
+        _die(f"Target file not found: '{target}'")
+
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        _die(
+            "OPENROUTER_API_KEY is not set.\n"
+            "  Add it to your .env file:  OPENROUTER_API_KEY=sk-or-..."
+        )
+
+    if not shutil.which(OPENCODE_CMD):
+        _die(
+            f"'{OPENCODE_CMD}' CLI not found on PATH.\n"
+            "  Install it with:  npm install -g opencode-ai"
+        )
+
+    logger.debug("Preflight checks passed.")
 
 
 # ---------------------------------------------------------------------------
@@ -376,76 +353,108 @@ def run_opencode(cmd: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 def get_current_branch() -> str:
-    result = subprocess.run(["git", "branch", "--show-current"], capture_output=True, text=True)
+    result = subprocess.run(
+        ["git", "branch", "--show-current"], capture_output=True, text=True
+    )
     return result.stdout.strip()
 
+
 def is_working_directory_dirty() -> bool:
-    result = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
+    result = subprocess.run(
+        ["git", "status", "--porcelain"], capture_output=True, text=True
+    )
     return bool(result.stdout.strip())
 
+
 def branch_exists(branch_name: str) -> bool:
-    result = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"])
+    result = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"]
+    )
     return result.returncode == 0
 
+
 def ensure_branch_is_synced(branch_name: str) -> None:
-    _git_info(f"Fetching latest from origin...")
+    _git_info("Fetching latest from origin...")
     subprocess.run(["git", "fetch", "-q"], check=False)
 
-def sanitize_to_git_branch(issue_ref: str) -> str:
-    s = str(issue_ref).lower()
-    s = re.sub(r'[^a-z0-9]+', '-', s).strip('-')
-    if s.isdigit():
-        return f"ai/issue-{s}"
-    return f"feat/{s}"
 
-def setup_feature_branch(issue_ref: str, base_branch: str | None, skip_hitl: bool) -> None:
-    """Resolve base branch and checkout a new feature branch for the pipeline."""
+def sanitize_to_git_branch(issue_ref: str) -> str:
+    """Produce a valid, sanitized Git branch name from a free-form issue ref.
+
+    Examples:
+        "123"          -> "ai/issue-123"
+        "PAY-404"      -> "feat/pay-404"
+        "Add OAuth2"   -> "feat/add-oauth2"
+    """
+    s = str(issue_ref).lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    return f"ai/issue-{s}" if s.isdigit() else f"feat/{s}"
+
+
+def setup_feature_branch(
+    issue_ref: str, base_branch: str | None, skip_hitl: bool
+) -> None:
+    """Resolve base branch and checkout a new feature branch for the pipeline.
+
+    Safety guardrails:
+      - Aborts if the working directory has uncommitted changes.
+      - Aborts if HEAD is ``main`` (unless ``--base-branch`` overrides).
+      - Prompts before appending commits to an existing branch (unless
+        ``--skip-hitl`` is active).
+    """
     if not shutil.which("git"):
         _warn(["git not found on PATH -- skipping branch setup."])
         return
 
     if is_working_directory_dirty():
-        _die("Working directory is dirty. Please commit or stash your changes before running the pipeline.")
-        
+        _die(
+            "Working directory is dirty. "
+            "Please commit or stash your changes before running the pipeline."
+        )
+
     current = get_current_branch()
     if base_branch:
         base = base_branch
     else:
         if current == "main":
-            _die("Hygiene Error: Cannot automatically branch from 'main'. Please switch to a working branch or use --base-branch override.")
+            _die(
+                "Hygiene Error: Cannot automatically branch from 'main'. "
+                "Please switch to a working branch or use --base-branch override."
+            )
         base = current
-        
+
     ensure_branch_is_synced(base)
-    
     branch_name = sanitize_to_git_branch(issue_ref)
-    
+    logger.debug(f"Resolved feature branch: {branch_name} (base: {base})")
+
     if branch_exists(branch_name):
         if skip_hitl:
             _git_info(f"Branch '{branch_name}' already exists. Checking out... (--skip-hitl)")
             subprocess.run(["git", "checkout", branch_name], check=True)
         else:
             logger.info("")
-            ans = input(f"  [git]  Branch '{branch_name}' already exists. Append commits to existing branch? [Y/n] ")
-            if ans.lower() not in ('', 'y', 'yes'):
+            ans = input(
+                f"  [git]  Branch '{branch_name}' already exists. "
+                "Append commits to existing branch? [Y/n] "
+            )
+            if ans.lower() not in ("", "y", "yes"):
                 _die("Aborted by user.")
             subprocess.run(["git", "checkout", branch_name], check=True)
     else:
         _git_info(f"Creating and checking out new branch: {branch_name} from {base}")
         subprocess.run(["git", "checkout", "-b", branch_name, base], check=True)
 
+
 def git_commit(files: list[Path], message: str) -> None:
     """Stage specific files and create an atomic git commit.
 
-    Implements the "Atomic Commits" strategy from the architecture manifesto
-    (§3.3): one commit per pass for precise regression pinpointing.
-
-    Graceful no-op cases:
-      - File wasn't modified -> "nothing to commit" -> skip.
-      - git not initialised -> warn and skip.
+    Implements the Atomic Commits strategy: one commit per pass for precise
+    regression pinpointing.  Gracefully skips if there is nothing to commit
+    or if git is not available.
 
     Args:
-        files:   File paths to stage with `git add`.
-        message: Commit message (use 'chore(ai): ...' convention).
+        files:   File paths to stage with ``git add``.
+        message: Commit message (``chore(ai): ...`` convention).
     """
     if not shutil.which("git"):
         _warn([
@@ -457,9 +466,7 @@ def git_commit(files: list[Path], message: str) -> None:
 
     for f in files:
         result = subprocess.run(
-            ["git", "add", str(f)],
-            capture_output=True,
-            text=True,
+            ["git", "add", str(f)], capture_output=True, text=True
         )
         if result.returncode != 0:
             _warn([
@@ -469,9 +476,7 @@ def git_commit(files: list[Path], message: str) -> None:
             ])
 
     result = subprocess.run(
-        ["git", "commit", "-m", message],
-        capture_output=True,
-        text=True,
+        ["git", "commit", "-m", message], capture_output=True, text=True
     )
 
     if result.returncode == 0:
@@ -479,8 +484,8 @@ def git_commit(files: list[Path], message: str) -> None:
         _git_info(f"Committed -> {summary}")
         return
 
-    combined_output = (result.stdout + result.stderr).lower()
-    if "nothing to commit" in combined_output or "nothing added to commit" in combined_output:
+    combined = (result.stdout + result.stderr).lower()
+    if "nothing to commit" in combined or "nothing added to commit" in combined:
         _git_info(
             f"No changes to stage for: '{message}'  "
             "(agent made no edits -- skipping commit)"
@@ -536,36 +541,29 @@ def run_tests_with_capture(test_cmd: list[str]) -> tuple[bool, str]:
     """Run the local test suite and capture its output.
 
     Args:
-        test_cmd: Fully-resolved command list (e.g. ['pytest', 'src/', '-v']).
+        test_cmd: Fully-resolved command list (e.g. ``['pytest', 'src/', '-v']``).
 
     Returns:
-        tuple[bool, str]:
-            - bool : True if the suite exited zero (all tests passed).
-            - str  : Combined stdout + stderr.
+        Tuple of (passed: bool, combined_output: str).
     """
     logger.info(f"  Running: {' '.join(test_cmd)}\n")
 
     try:
-        result = subprocess.run(
-            test_cmd,
-            capture_output=True,
-            text=True,
-        )
-
+        result = subprocess.run(test_cmd, capture_output=True, text=True)
         if result.stdout:
             logger.debug(result.stdout)
         if result.stderr:
             logger.debug(result.stderr)
 
-        combined_output = result.stdout + "\n" + result.stderr
-        return result.returncode == 0, combined_output
+        combined = result.stdout + "\n" + result.stderr
+        return result.returncode == 0, combined
 
     except FileNotFoundError:
         msg = (
             f"Test runner not found: '{test_cmd[0]}'\n"
-            f"Install it or supply a valid command with --test-cmd.\n"
-            f"  Python:  pip install pytest\n"
-            f"  JS/TS:   npm install"
+            "Install it or supply a valid command with --test-cmd.\n"
+            "  Python:  pip install pytest\n"
+            "  JS/TS:   npm install"
         )
         _warn(msg.splitlines())
         return False, msg
@@ -574,42 +572,15 @@ def run_tests_with_capture(test_cmd: list[str]) -> tuple[bool, str]:
 def infer_test_command(target_file: Path) -> list[str]:
     """Return a sensible default test command based on the file extension."""
     ext = target_file.suffix.lower()
-
     if ext == ".py":
         return ["pytest", str(target_file.parent), "--tb=short", "-v"]
-
     if ext in (".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts"):
         return ["npm", "test"]
-
     return ["pytest", str(target_file.parent), "--tb=short"]
 
 
 # ---------------------------------------------------------------------------
-# Self-correction loop -- the "Actor-Critic" inner loop
-#
-# CONTEXT COMPACTION
-# ------------------
-# This is the critical invariant introduced in v0.3.1.  In the v0.3
-# orchestrator, the raw test failure log was embedded inside the prompt
-# text itself.  While functional, this inflates the prompt context and
-# -- more importantly -- means that context is implicitly carried forward
-# across passes via the agent's working memory.  LLMs exhibit "attention
-# drift" (the "lost in the middle" syndrome), where older context
-# fragments degrade performance on the current task.
-#
-# The v0.3.1 strategy:
-#   1. Write the test failure output to a TEMPORARY file
-#      (.opencode_error.log).
-#   2. Pass that file as a separate --file argument (not embedded in
-#      the prompt).  The agent reads it, but the file is an explicit
-#      artefact, not conversational context.
-#   3. The moment tests pass, DELETE .opencode_error.log.  The next
-#      pass inherits ZERO debugging context from the previous pass.
-#      It starts fresh, with only the final correct code on disk.
-#
-# This is "Context Compaction": the orchestrator actively deletes
-# intermediate debugging state so no single agent ever processes more
-# context than necessary.  Each pass is a clean start.
+# Self-correction loop (Actor-Critic inner loop)
 # ---------------------------------------------------------------------------
 
 def run_pass_with_self_correction(
@@ -624,52 +595,40 @@ def run_pass_with_self_correction(
     """Execute an agent pass backed by a test-verification gate.
 
     Flow:
-      1. Run the agent with initial_prompt.
+      1. Run the agent with ``initial_prompt``.
       2. Run the test suite.
       3. If tests fail and retries remain:
-           a. Write the raw error output to .opencode_error.log
-           b. Re-run the agent with the error log attached
+           a. Write raw error output to ``.opencode_error.log`` (Context Compaction).
+           b. Re-run the agent with the error log attached as a ``--file``.
            c. Re-run the test suite.
-           d. If tests pass: DELETE .opencode_error.log immediately.
+           d. If tests pass: DELETE ``.opencode_error.log`` immediately.
       4. If max retries exhausted -> abort.
 
-    The error log is passed as a --file argument, NOT embedded in the
-    prompt.  This keeps the prompt compact and ensures the debugging
-    context is an explicit, disposable artefact (Context Compaction).
-
     Args:
-        pass_num:     Pass number (e.g. 3 for Core Implementation).
-        agent:        Agent ID string (key in AGENTS dict).
+        pass_num:       Pass number (e.g. 3 for Core Implementation).
+        agent:          Agent ID string (key in AGENTS dict).
         initial_prompt: First user-turn message.
-        target:       The target source file path.
-        artefact_dir: Directory containing design.mmd and spec.gherkin.
-        test_cmd:     Test command to run after each agent invocation.
-        max_retries:  Additional correction attempts (default 2 -> 3 total).
+        target:         The target source file path.
+        artefact_dir:   Directory containing design.mmd and spec.gherkin.
+        test_cmd:       Test command to run after each agent invocation.
+        max_retries:    Additional correction attempts (default 2 -> 3 total).
 
     Raises:
         SystemExit(1): If all attempts are exhausted and tests still fail.
     """
     pass_label = PASS_LABELS[pass_num]
     total_attempts = max_retries + 1
-
-    # Path to the disposable error log used for Context Compaction.
     error_log_path = artefact_dir / ERROR_LOG_STUB
 
-    # --- Attempt 0: initial agent invocation ---
-    #
-    # The Static Prefix is enforced by build_opencode_command().
-    # No error log file is attached yet because this is the first attempt.
     logger.info(f"\n  -> Invoking {agent} (initial run)...\n")
     initial_cmd = build_opencode_command(
         agent_name=agent,
         prompt=initial_prompt,
         target_file=target,
         artefact_dir=artefact_dir,
-        # error_log=None -- no error context on the first attempt
     )
     run_opencode(initial_cmd)
 
-    # --- Verification + correction loop ---
     for attempt_idx in range(total_attempts):
         human_attempt_num = attempt_idx + 1
 
@@ -681,22 +640,15 @@ def run_pass_with_self_correction(
         passed, error_output = run_tests_with_capture(test_cmd)
 
         if passed:
-            # === CONTEXT COMPACTION: flush error context ===
-            #
-            # Tests are green.  The error log from a previous retry (if
-            # any) is now stale debugging context.  Deleting it HERE
-            # ensures the next pipeline pass starts with a clean slate.
-            # No agent ever inherits another pass's error history.
+            # Context Compaction: flush stale error log
             if error_log_path.exists():
                 error_log_path.unlink()
                 logger.info(f"  [compaction]  Deleted {error_log_path} -- context reset.\n")
-
             logger.info(f"  ✓  Tests passed on attempt {human_attempt_num}/{total_attempts}.\n")
             return
 
-        # --- Tests failed ---
+        # Tests failed
         if attempt_idx == max_retries:
-            # Final attempt exhausted.  Clean up the error log and abort.
             if error_log_path.exists():
                 error_log_path.unlink()
 
@@ -707,8 +659,7 @@ def run_pass_with_self_correction(
             )
             _die(
                 f"Pass {pass_num} ({pass_label}) FAILED after {total_attempts} attempt(s).\n\n"
-                f"  The test suite still fails after {max_retries} self-correction "
-                f"retries.\n"
+                f"  The test suite still fails after {max_retries} self-correction retries.\n"
                 f"  Human intervention is required.\n\n"
                 f"  Suggested actions:\n"
                 f"    1. Run: {' '.join(test_cmd)}\n"
@@ -720,7 +671,6 @@ def run_pass_with_self_correction(
                 f"{'-' * 60}"
             )
 
-        # --- Still have retries -- trigger self-correction ---
         retries_remaining = max_retries - attempt_idx
         logger.info(
             f"\n  Tests FAILED (attempt {human_attempt_num}/{total_attempts}).\n"
@@ -728,24 +678,13 @@ def run_pass_with_self_correction(
             f"{'retry' if retries_remaining == 1 else 'retries'} remaining.\n"
         )
 
-        # === CONTEXT COMPACTION: write error to a TEMPORARY file ===
-        #
-        # Instead of embedding 2000+ characters of stack trace inside the
-        # prompt (which inflates the per-pass context and bleeds into the
-        # next pass via implicit history), we write the raw failure log
-        # to a DISPOSABLE file on disk.
-        #
-        # The agent reads this file as a `--file` attachment.  It has the
-        # same diagnostic value as an inline prompt embedding, but it is
-        # an EXPLICIT artefact that the orchestrator can delete the
-        # moment tests pass.  No implicit state leaks across passes.
+        # Context Compaction: write error to a disposable file
         error_log_path.write_text(error_output, encoding="utf-8")
-        logger.info(f"  [compaction]  Error log written to {error_log_path} ({len(error_output)} bytes)\n")
+        logger.info(
+            f"  [compaction]  Error log written to {error_log_path} "
+            f"({len(error_output)} bytes)\n"
+        )
 
-        # Build the correction prompt.  Notice: the prompt does NOT
-        # embed the raw test failure log.  It only instructs the agent
-        # to read the attached error log file.  This keeps the prompt
-        # itself compact and stable.
         correction_prompt = (
             f"You are running as Pass {pass_num} ({pass_label}) "
             f"of the v{PIPELINE_VERSION} AI Factory pipeline.\n\n"
@@ -762,12 +701,11 @@ def run_pass_with_self_correction(
             f"  - Fix the ROOT CAUSE of the failure, not just the symptom."
         )
 
-        logger.info(f"  -> Invoking {agent} (self-correction cycle {human_attempt_num}/{max_retries})...\n")
+        logger.info(
+            f"  -> Invoking {agent} "
+            f"(self-correction cycle {human_attempt_num}/{max_retries})...\n"
+        )
 
-        # The error log file is passed as an explicit `--file` argument
-        # via build_opencode_command().  It sits AFTER the static prefix
-        # (design.mmd, spec.gherkin, target), so it does not fragment
-        # the prefix-cache lookup for the immutable artefacts.
         correction_cmd = build_opencode_command(
             agent_name=agent,
             prompt=correction_prompt,
@@ -777,9 +715,61 @@ def run_pass_with_self_correction(
         )
         run_opencode(correction_cmd)
 
-        # Loop continues -> test suite re-run at top of next iteration.
-        # The .opencode_error.log file is overwritten each retry cycle
-        # (because error_output changes), then deleted when tests pass.
+
+# ---------------------------------------------------------------------------
+# Input resolution
+# ---------------------------------------------------------------------------
+
+def resolve_input_source(input_source: str, source_type: str) -> Path:
+    """Validate and resolve the pipeline input to a concrete file path.
+
+    Supports three source types:
+      ``file``   -- a local file path (validated immediately).
+      ``string`` -- a raw feature description string (future).
+      ``github`` -- a GitHub issue URL (future).
+
+    Args:
+        input_source: Raw value of the positional CLI argument.
+        source_type:  One of ``file``, ``string``, ``github``.
+
+    Returns:
+        Resolved absolute Path to the target source file.
+
+    Raises:
+        SystemExit(1): If the source cannot be resolved or is not yet supported.
+    """
+    if source_type == "file":
+        # Resolve relative to the caller's CWD, not the install location.
+        path = Path(os.getcwd()) / input_source
+        path = path.resolve()
+        if not path.is_file():
+            _die(
+                f"Input file not found: '{path}'\n"
+                f"  Ensure the path is correct relative to your current directory:\n"
+                f"  CWD: {os.getcwd()}"
+            )
+        logger.debug(f"Resolved target file: {path}")
+        return path
+
+    if source_type == "string":
+        _die(
+            "source-type 'string' is not yet implemented.\n"
+            "  Planned for a future release: the raw string will be written to a\n"
+            "  temporary feature file before Pass 0 begins.\n\n"
+            "  NotImplementedError: string input source"
+        )
+
+    if source_type == "github":
+        _die(
+            "source-type 'github' is not yet implemented.\n"
+            "  Planned for a future release: the GitHub issue body will be fetched\n"
+            "  via the API and materialised as a local feature file.\n\n"
+            "  NotImplementedError: github input source"
+        )
+
+    _die(f"Unknown source-type: '{source_type}'")
+    # Unreachable; satisfies type checker
+    raise SystemExit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -789,41 +779,64 @@ def run_pass_with_self_correction(
 def _build_arg_parser() -> argparse.ArgumentParser:
     """Construct and return the CLI argument parser."""
     parser = argparse.ArgumentParser(
-        prog="pipeline_v3_1.py",
+        prog="agentic-tdd",
         description=(
-            f"v{PIPELINE_VERSION} AI Factory Pipeline -- Full 8-pass state machine\n"
+            f"agentic-tdd v{PIPELINE_VERSION} -- Multi-Pass Agentic TDD Pipeline\n"
             "\n"
-            "v0.3.1 adds:\n"
-            "  - Static Prefix anchoring (immutable file ordering for cache hits)\n"
-            "  - Context Compaction (disposable error logs, fresh pass starts)\n"
-            "  - Single-model lock (deepseek-coder-v4 across all 8 passes)\n"
+            "Runs an 8-pass AI factory pipeline against a target source file.\n"
+            "Install globally:  pipx install .\n"
+            "Install for dev:   pip install -e .\n"
+            "\n"
+            "v0.3.3 adds:\n"
+            "  - Packaged as an installable CLI (agentic-tdd)\n"
+            "  - Flexible --source-type flag (file | string | github)\n"
+            "  - CWD-aware execution (runs in your project root)\n"
             "\n"
             "Passes:\n"
-            "  0  Design        (deepseek-coder-v4)  -> design.mmd + spec.gherkin\n"
-            "     [HUMAN-IN-THE-LOOP gate]\n"
-            "  1  Contracts     (deepseek-coder-v4)  -> type stubs in target file\n"
-            "  2  Tests         (deepseek-coder-v4)  -> test file  [Red Phase]\n"
-            "  3  Core Logic    (deepseek-coder-v4)  -> implementation [Green Phase]\n"
-            "     [self-correction loop: max 2 retries]\n"
-            "  4  Refactor      (deepseek-coder-v4)  -> complexity/DRY cleanup\n"
-            "     [self-correction loop: max 2 retries]\n"
-            "  5  Security      (deepseek-coder-v4)  -> OWASP mitigations\n"
-            "     [self-correction loop: max 2 retries]\n"
-            "  6  Observability (deepseek-coder-v4)  -> logging + error classes\n"
-            "     [self-correction loop: max 2 retries]\n"
-            "  7  Docs          (deepseek-coder-v4)  -> docstrings + @see links\n\n"
+            "  0  Design        -> design.mmd + spec.gherkin  [HITL gate]\n"
+            "  1  Contracts     -> type stubs in target file\n"
+            "  2  Tests         -> test file                   [Red Phase]\n"
+            "  3  Core Logic    -> implementation              [Green Phase + SC]\n"
+            "  4  Refactor      -> complexity/DRY cleanup      [SC]\n"
+            "  5  Security      -> OWASP mitigations           [SC]\n"
+            "  6  Observability -> logging + error classes     [SC]\n"
+            "  7  Docs          -> docstrings + @see links\n\n"
             "  git commit fired after every pass (1-7)"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
+    # ----- Positional --------------------------------------------------------
     parser.add_argument(
-        "target_file",
-        metavar="TARGET_FILE",
-        type=Path,
-        help="Source file to run the pipeline against.  Example: src/calculator.py",
+        "input_source",
+        metavar="INPUT_SOURCE",
+        type=str,
+        help=(
+            "The pipeline input. Interpretation depends on --source-type:\n"
+            "  file   : path to the source file to process  (default)\n"
+            "  string : raw feature description string      (future)\n"
+            "  github : GitHub issue URL                    (future)\n"
+            "Example: agentic-tdd src/calculator.py"
+        ),
     )
 
+    # ----- Source type -------------------------------------------------------
+    parser.add_argument(
+        "--source-type",
+        dest="source_type",
+        metavar="TYPE",
+        choices=["file", "string", "github"],
+        default="file",
+        help=(
+            "How to interpret INPUT_SOURCE.  Choices: file | string | github.\n"
+            "Default: file\n"
+            "  file   -- INPUT_SOURCE is a path to the target source file.\n"
+            "  string -- INPUT_SOURCE is a raw feature description (future).\n"
+            "  github -- INPUT_SOURCE is a GitHub issue URL (future)."
+        ),
+    )
+
+    # ----- Logging -----------------------------------------------------------
     parser.add_argument(
         "--log-level",
         dest="log_level",
@@ -831,16 +844,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Set the logging level (default: INFO)."
+        help="Set the logging verbosity (default: INFO).",
     )
 
+    # ----- Git branching -----------------------------------------------------
     parser.add_argument(
         "--issue",
         dest="issue",
         metavar="REF",
         type=str,
         default=None,
-        help="Issue reference (e.g., '123' or 'PAY-404') to auto-create and checkout a feature branch."
+        help=(
+            "Issue reference (e.g. '123' or 'PAY-404') to auto-create and\n"
+            "checkout an isolated feature branch before any passes run."
+        ),
     )
 
     parser.add_argument(
@@ -849,9 +866,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         type=str,
         default=None,
-        help="Optional base branch to checkout from, bypassing the 'main' check (e.g., 'dev')."
+        help=(
+            "Base branch to branch from (e.g. 'dev').  Bypasses the 'main'\n"
+            "hygiene check.  Requires --issue."
+        ),
     )
 
+    # ----- Pipeline control --------------------------------------------------
     parser.add_argument(
         "--test-cmd",
         dest="test_cmd",
@@ -881,34 +902,38 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 # ---------------------------------------------------------------------------
-# Main pipeline -- the state machine
+# Main pipeline -- the 8-pass state machine
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    """Entry point -- orchestrate all 8 pipeline passes end-to-end.
+    """CLI entrypoint.  Mapped to ``agentic-tdd`` by pyproject.toml.
 
-    Every agent invocation goes through build_opencode_command(), which
-    enforces the Static Prefix (immutable file ordering) and Single-Model
-    Lock (no --model override) invariants.  Self-correction passes use
-    run_pass_with_self_correction(), which enforces Context Compaction
-    (disposable error logs, clean pass starts).
+    Orchestrates all 8 pipeline passes end-to-end.  Execution always runs in
+    ``os.getcwd()`` -- the directory from which the developer invoked the
+    command -- so that relative file paths and .env lookups behave correctly
+    regardless of where the package is installed.
     """
-
     args = _build_arg_parser().parse_args()
 
     setup_logging(args.log_level)
 
+    logger.debug(f"agentic-tdd v{PIPELINE_VERSION} starting")
+    logger.debug(f"CWD: {os.getcwd()}")
+    logger.debug(f"args: {args}")
+
+    # --- Git branch setup (if requested) ------------------------------------
     if args.issue:
         setup_feature_branch(args.issue, args.base_branch, args.skip_hitl)
 
-    target: Path = args.target_file.resolve()
+    # --- Resolve the input source -------------------------------------------
+    target: Path = resolve_input_source(args.input_source, args.source_type)
     target_dir: Path = target.parent
 
-    # Artefact paths -- co-located with the target file.
+    # Artefact paths co-located with the target file
     design_mmd:   Path = target_dir / ARTEFACT_DESIGN
     spec_gherkin: Path = target_dir / ARTEFACT_GHERKIN
 
-    # Test file follows language conventions.
+    # Test file naming follows language conventions
     _stem = target.stem
     _ext  = target.suffix
     _test_name = (
@@ -917,8 +942,8 @@ def main() -> None:
     )
     test_file: Path = target_dir / _test_name
 
-    # Environment setup.
-    load_dot_env()
+    # --- Environment & preflight -------------------------------------------
+    load_dot_env()          # resolves to CWD/.env
     preflight_checks(target)
 
     if args.test_cmd:
@@ -926,20 +951,10 @@ def main() -> None:
     else:
         test_cmd = infer_test_command(target)
 
-    _banner(target, test_cmd, args.skip_hitl)
+    _banner(target, test_cmd, args.skip_hitl, args.source_type)
 
     # ====================================================================
-    # PASS 0 -- Design & Architecture  (deepseek-coder-v4)
-    #
-    # Goal:
-    #   Produce design.mmd + spec.gherkin from the target source file.
-    #   Human-in-the-Loop review before any code is written.
-    #
-    # Static Prefix note:
-    #   At Pass 0, design.mmd and spec.gherkin do not exist yet, so
-    #   build_opencode_command() only attaches the target file.  From
-    #   Pass 1 onward, every call includes design.mmd and spec.gherkin
-    #   as the immutable cache prefix.
+    # PASS 0 -- Design & Architecture
     # ====================================================================
     _pass_header(f"Pass 0 -- {PASS_LABELS[0]}  [{AGENTS[0]}]")
 
@@ -972,21 +987,13 @@ def main() -> None:
     ))
     _pass_ok(f"Pass 0 -- {PASS_LABELS[0]}")
 
-    # --------------------------------------------------------------------
-    # HUMAN-IN-THE-LOOP GATE
-    # --------------------------------------------------------------------
     if not args.skip_hitl:
         hitl_gate(design_mmd, spec_gherkin)
     else:
         logger.info("  [--skip-hitl]  Skipping human approval gate.\n")
 
     # ====================================================================
-    # PASS 1 -- Contracts & Types  (deepseek-coder-v4)
-    #
-    # Static Prefix anchor: from here onward, EVERY pass invocation
-    # attaches design.mmd first, then spec.gherkin, then the target file.
-    # This ordering is enforced by build_opencode_command() and never
-    # varies.
+    # PASS 1 -- Contracts & Types
     # ====================================================================
     _pass_header(f"Pass 1 -- {PASS_LABELS[1]}  [{AGENTS[1]}]")
 
@@ -1020,14 +1027,10 @@ def main() -> None:
         artefact_dir=target_dir,
     ))
     _pass_ok(f"Pass 1 -- {PASS_LABELS[1]}")
-
-    git_commit(
-        files=[target],
-        message=f"chore(ai): completed Pass 1 -- {PASS_LABELS[1]}",
-    )
+    git_commit(files=[target], message=f"chore(ai): completed Pass 1 -- {PASS_LABELS[1]}")
 
     # ====================================================================
-    # PASS 2 -- TDD Test Generation  (deepseek-coder-v4)  [Red Phase]
+    # PASS 2 -- TDD Test Generation  [Red Phase]
     # ====================================================================
     _pass_header(f"Pass 2 -- {PASS_LABELS[2]}  [{AGENTS[2]}]")
 
@@ -1062,18 +1065,10 @@ def main() -> None:
         artefact_dir=target_dir,
     ))
     _pass_ok(f"Pass 2 -- {PASS_LABELS[2]}")
-
-    git_commit(
-        files=[test_file],
-        message=f"chore(ai): completed Pass 2 -- {PASS_LABELS[2]}",
-    )
+    git_commit(files=[test_file], message=f"chore(ai): completed Pass 2 -- {PASS_LABELS[2]}")
 
     # ====================================================================
-    # PASS 3 -- Core Implementation  (deepseek-coder-v4)  [Green Phase]
-    #
-    # Gate:  Local test suite + self-correction loop (max 2 retries).
-    #        Context Compaction: error logs are written to .opencode_error.log,
-    #        then deleted the moment tests pass.
+    # PASS 3 -- Core Implementation  [Green Phase + self-correction]
     # ====================================================================
     _pass_header(f"Pass 3 -- {PASS_LABELS[3]}  [{AGENTS[3]}]")
 
@@ -1098,22 +1093,14 @@ def main() -> None:
     )
 
     run_pass_with_self_correction(
-        pass_num=3,
-        agent=AGENTS[3],
-        initial_prompt=impl_prompt,
-        target=target,
-        artefact_dir=target_dir,
-        test_cmd=test_cmd,
+        pass_num=3, agent=AGENTS[3], initial_prompt=impl_prompt,
+        target=target, artefact_dir=target_dir, test_cmd=test_cmd,
     )
     _pass_ok(f"Pass 3 -- {PASS_LABELS[3]}")
-
-    git_commit(
-        files=[target],
-        message=f"chore(ai): completed Pass 3 -- {PASS_LABELS[3]}",
-    )
+    git_commit(files=[target], message=f"chore(ai): completed Pass 3 -- {PASS_LABELS[3]}")
 
     # ====================================================================
-    # PASS 4 -- Refactor & Optimise  (deepseek-coder-v4)
+    # PASS 4 -- Refactor & Optimise  [self-correction]
     # ====================================================================
     _pass_header(f"Pass 4 -- {PASS_LABELS[4]}  [{AGENTS[4]}]")
 
@@ -1134,22 +1121,14 @@ def main() -> None:
     )
 
     run_pass_with_self_correction(
-        pass_num=4,
-        agent=AGENTS[4],
-        initial_prompt=refactor_prompt,
-        target=target,
-        artefact_dir=target_dir,
-        test_cmd=test_cmd,
+        pass_num=4, agent=AGENTS[4], initial_prompt=refactor_prompt,
+        target=target, artefact_dir=target_dir, test_cmd=test_cmd,
     )
     _pass_ok(f"Pass 4 -- {PASS_LABELS[4]}")
-
-    git_commit(
-        files=[target],
-        message=f"chore(ai): completed Pass 4 -- {PASS_LABELS[4]}",
-    )
+    git_commit(files=[target], message=f"chore(ai): completed Pass 4 -- {PASS_LABELS[4]}")
 
     # ====================================================================
-    # PASS 5 -- Security Hardening  (deepseek-coder-v4)
+    # PASS 5 -- Security Hardening  [self-correction]
     # ====================================================================
     _pass_header(f"Pass 5 -- {PASS_LABELS[5]}  [{AGENTS[5]}]")
 
@@ -1169,22 +1148,14 @@ def main() -> None:
     )
 
     run_pass_with_self_correction(
-        pass_num=5,
-        agent=AGENTS[5],
-        initial_prompt=security_prompt,
-        target=target,
-        artefact_dir=target_dir,
-        test_cmd=test_cmd,
+        pass_num=5, agent=AGENTS[5], initial_prompt=security_prompt,
+        target=target, artefact_dir=target_dir, test_cmd=test_cmd,
     )
     _pass_ok(f"Pass 5 -- {PASS_LABELS[5]}")
-
-    git_commit(
-        files=[target],
-        message=f"chore(ai): completed Pass 5 -- {PASS_LABELS[5]}",
-    )
+    git_commit(files=[target], message=f"chore(ai): completed Pass 5 -- {PASS_LABELS[5]}")
 
     # ====================================================================
-    # PASS 6 -- Observability & Logging  (deepseek-coder-v4)
+    # PASS 6 -- Observability & Logging  [self-correction]
     # ====================================================================
     _pass_header(f"Pass 6 -- {PASS_LABELS[6]}  [{AGENTS[6]}]")
 
@@ -1204,22 +1175,14 @@ def main() -> None:
     )
 
     run_pass_with_self_correction(
-        pass_num=6,
-        agent=AGENTS[6],
-        initial_prompt=observability_prompt,
-        target=target,
-        artefact_dir=target_dir,
-        test_cmd=test_cmd,
+        pass_num=6, agent=AGENTS[6], initial_prompt=observability_prompt,
+        target=target, artefact_dir=target_dir, test_cmd=test_cmd,
     )
     _pass_ok(f"Pass 6 -- {PASS_LABELS[6]}")
-
-    git_commit(
-        files=[target],
-        message=f"chore(ai): completed Pass 6 -- {PASS_LABELS[6]}",
-    )
+    git_commit(files=[target], message=f"chore(ai): completed Pass 6 -- {PASS_LABELS[6]}")
 
     # ====================================================================
-    # PASS 7 -- Documentation  (deepseek-coder-v4)
+    # PASS 7 -- Documentation
     # ====================================================================
     _pass_header(f"Pass 7 -- {PASS_LABELS[7]}  [{AGENTS[7]}]")
 
@@ -1250,11 +1213,7 @@ def main() -> None:
         artefact_dir=target_dir,
     ))
     _pass_ok(f"Pass 7 -- {PASS_LABELS[7]}")
-
-    git_commit(
-        files=[target],
-        message=f"chore(ai): completed Pass 7 -- {PASS_LABELS[7]}",
-    )
+    git_commit(files=[target], message=f"chore(ai): completed Pass 7 -- {PASS_LABELS[7]}")
 
     # ====================================================================
     # Final summary
@@ -1267,8 +1226,10 @@ def main() -> None:
 
     logger.info("")
     logger.info("┌" + "─" * _W + "┐")
-    logger.info(f"│  v{PIPELINE_VERSION} Pipeline complete -- all 8 passes ran successfully."
-          + " " * (_W - 59) + "│")
+    logger.info(
+        f"│  v{PIPELINE_VERSION} Pipeline complete -- all 8 passes ran successfully."
+        + " " * (_W - 60) + "│"
+    )
     logger.info("│" + " " * _W + "│")
     logger.info(f"│  Target file    : {_fp(target):<{_max_path}}│")
     logger.info("│" + " " * _W + "│")
@@ -1286,7 +1247,7 @@ def main() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Entry point (for direct script execution; preferred path is via pipx/pip)
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -1304,7 +1265,6 @@ if __name__ == "__main__":
         logger.error(
             f"\n[FATAL]  opencode exited with code {exc.returncode}.\n"
             f"  Command: {cmd_str}\n"
-            f"  Check the terminal output above for details.\n",
-            
+            f"  Check the terminal output above for details.\n"
         )
         sys.exit(1)

@@ -8,12 +8,16 @@ Items in no particular order of priority. Contributions welcome — see the [arc
 - [ ] Run a full pipeline against a real-world feature and document the results
 - [ ] Figure out how to invoke the pipeline from a ticket/issue (GitHub Actions integration)
 - [ ] Dev mode vs. debug mode — should there be separate verbosity levels and dry-run support?
+- [ ] Handling agent failures and infinite loops. Further enhancement - Orchestrator captures the stdout/stderr, saves it to logs/pass_n_failures.txt. Orchestrator prompts the agent again, appending the failure log. This will ensure agents try new approaches different from what they tried before.  
 - [ ] Better LiteLLM config using Postgres for budget tracking (see `infra/` for current setup)
 - [ ] Bloop integration for cross-repo semantic context retrieval
-- [ ] VS Code extension / cleaner HITL flow for reviewing and editing artifact files (`.mmd`, `.gherkin`) during the Pass 0 gate
+- [ ] VS Code extension / cleaner HITL flow for reviewing and editing artifact files (`.mmd`, `.gherkin`) during the Pass 0 gate. 
+- [ ] Better HITL overall - this will keep improving once we start using this tool in real projects and tickets.
 - [ ] Semgrep integration as a hard-fail gate between passes (see architecture manifesto § 4.3)
 - [ ] DevContainer / Nix flake for deterministic agent sandboxing (see architecture manifesto § 2.3)
 - [ ] Benchmarking: quantify token savings from Static Prefix caching across model providers
+- [ ] Improve security agent - input sanitisation, zip bombs, size restrictions etc. Do we need different frameworks for frontend, backend and desktop apps ?
+- [ ] Pass 0 - better workflow - make a git branch before working on the problem.
 
 ## Completed
 

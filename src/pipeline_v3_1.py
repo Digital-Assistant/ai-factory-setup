@@ -56,7 +56,9 @@ Prerequisites
 """
 
 import argparse
+import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -68,6 +70,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 PIPELINE_VERSION = "0.3.1"
+logger = logging.getLogger(__name__)
 
 OPENCODE_CMD = "opencode"
 
@@ -283,62 +286,79 @@ def preflight_checks(target: Path) -> None:
 # Terminal output helpers
 # ---------------------------------------------------------------------------
 
+class PipelineFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        if record.levelno == logging.INFO:
+            return record.getMessage()
+        return super().format(record)
+
+def setup_logging(level_name: str) -> None:
+    level = getattr(logging, level_name.upper(), logging.INFO)
+    logger.setLevel(level)
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(PipelineFormatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    if logger.hasHandlers():
+        logger.handlers.clear()
+    logger.addHandler(handler)
+
 def _banner(target: Path, test_cmd: list[str], skip_hitl: bool) -> None:
     """Print the v0.3.1 pipeline startup banner."""
-    print()
-    print("┌" + "─" * _W + "┐")
-    print(f"│  ai-factory-setup  •  v{PIPELINE_VERSION} Pipeline  •  8-Pass State Machine"
+    logger.info("")
+    logger.info("┌" + "─" * _W + "┐")
+    logger.info(f"│  ai-factory-setup  •  v{PIPELINE_VERSION} Pipeline  •  8-Pass State Machine"
           + " " * (_W - 59) + "│")
-    print("└" + "─" * _W + "┘")
-    print()
-    print(f"  Target     : {target}")
-    print(f"  Test cmd   : {' '.join(test_cmd)}")
-    print(f"  HITL gate  : {'disabled (--skip-hitl)' if skip_hitl else 'enabled'}")
-    print(f"  Max retries: {MAX_CORRECTION_RETRIES} (per guarded pass)")
-    print()
-    print("  Cache strategy: Static Prefix  +  Context Compaction")
-    print()
-    print("  Pass schedule:")
+    logger.info("└" + "─" * _W + "┘")
+    logger.info("")
+    logger.info(f"  Target     : {target}")
+    logger.info(f"  Test cmd   : {' '.join(test_cmd)}")
+    logger.info(f"  HITL gate  : {'disabled (--skip-hitl)' if skip_hitl else 'enabled'}")
+    logger.info(f"  Max retries: {MAX_CORRECTION_RETRIES} (per guarded pass)")
+    logger.info("")
+    logger.info("  Cache strategy: Static Prefix  +  Context Compaction")
+    logger.info("")
+    logger.info("  Pass schedule:")
     for num, label in PASS_LABELS.items():
         gate = "  <- self-correction + git commit" if num in (3, 4, 5, 6) else \
                "  <- git commit" if num in (1, 2, 7) else \
                "  <- HITL gate"
-        print(f"    {num}  {label:<36}{gate}")
-    print()
+        logger.info(f"    {num}  {label:<36}{gate}")
+    logger.info("")
 
 
 def _pass_header(label: str) -> None:
-    print()
-    print("━" * _W)
-    print(f"  {label}")
-    print("━" * _W)
-    print()
+    logger.info("")
+    logger.info("━" * _W)
+    logger.info(f"  {label}")
+    logger.info("━" * _W)
+    logger.info("")
 
 
 def _pass_ok(label: str) -> None:
-    print(f"\n  ✓  {label} — complete.\n")
+    logger.info(f"\n  ✓  {label} — complete.\n")
 
 
 def _warn(lines: list[str]) -> None:
-    print()
-    print("┌" + "─" * _W + "┐")
-    print("│  ⚠  WARNING" + " " * (_W - 12) + "│")
-    print("│" + " " * _W + "│")
+    logger.warning("")
+    logger.warning("┌" + "─" * _W + "┐")
+    logger.warning("│  ⚠  WARNING" + " " * (_W - 12) + "│")
+    logger.warning("│" + " " * _W + "│")
     for line in lines:
         padded = f"│  {line}"
-        print(padded + " " * max(0, _W + 1 - len(padded)) + "│")
-    print("│" + " " * _W + "│")
-    print("└" + "─" * _W + "┘")
-    print()
+        logger.warning(padded + " " * max(0, _W + 1 - len(padded)) + "│")
+    logger.warning("│" + " " * _W + "│")
+    logger.warning("└" + "─" * _W + "┘")
+    logger.warning("")
 
 
 def _die(msg: str) -> None:
-    print(f"\n[FATAL]  {msg}\n", file=sys.stderr)
+    logger.error(f"
+[FATAL]  {msg}
+")
     sys.exit(1)
 
 
 def _git_info(msg: str) -> None:
-    print(f"  [git]  {msg}")
+    logger.info(f"  [git]  {msg}")
 
 
 # ---------------------------------------------------------------------------
@@ -346,26 +366,72 @@ def _git_info(msg: str) -> None:
 # ---------------------------------------------------------------------------
 
 def run_opencode(cmd: list[str]) -> None:
-    """Execute a pre-built opencode command, streaming output to the terminal.
-
-    The command order is constructed by build_opencode_command() which
-    enforces the Static Prefix invariant.  This function merely invokes
-    the command -- it does not reorder, reattach, or override any argument.
-    That separation guarantees the file ordering can never accidentally
-    drift between passes.
-
-    Args:
-        cmd: Full subprocess command list from build_opencode_command().
-
-    Raises:
-        subprocess.CalledProcessError: If opencode exits non-zero.
-    """
+    """Execute a pre-built opencode command, streaming output to the terminal."""
+    logger.debug(f"Running opencode command: {shlex.join(cmd)}")
     subprocess.run(cmd, check=True)
 
 
 # ---------------------------------------------------------------------------
-# Git integration -- atomic commits
+# Git integration -- atomic commits & branching
 # ---------------------------------------------------------------------------
+
+def get_current_branch() -> str:
+    result = subprocess.run(["git", "branch", "--show-current"], capture_output=True, text=True)
+    return result.stdout.strip()
+
+def is_working_directory_dirty() -> bool:
+    result = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
+    return bool(result.stdout.strip())
+
+def branch_exists(branch_name: str) -> bool:
+    result = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"])
+    return result.returncode == 0
+
+def ensure_branch_is_synced(branch_name: str) -> None:
+    _git_info(f"Fetching latest from origin...")
+    subprocess.run(["git", "fetch", "-q"], check=False)
+
+def sanitize_to_git_branch(issue_ref: str) -> str:
+    s = str(issue_ref).lower()
+    s = re.sub(r'[^a-z0-9]+', '-', s).strip('-')
+    if s.isdigit():
+        return f"ai/issue-{s}"
+    return f"feat/{s}"
+
+def setup_feature_branch(issue_ref: str, base_branch: str | None, skip_hitl: bool) -> None:
+    """Resolve base branch and checkout a new feature branch for the pipeline."""
+    if not shutil.which("git"):
+        _warn(["git not found on PATH -- skipping branch setup."])
+        return
+
+    if is_working_directory_dirty():
+        _die("Working directory is dirty. Please commit or stash your changes before running the pipeline.")
+        
+    current = get_current_branch()
+    if base_branch:
+        base = base_branch
+    else:
+        if current == "main":
+            _die("Hygiene Error: Cannot automatically branch from 'main'. Please switch to a working branch or use --base-branch override.")
+        base = current
+        
+    ensure_branch_is_synced(base)
+    
+    branch_name = sanitize_to_git_branch(issue_ref)
+    
+    if branch_exists(branch_name):
+        if skip_hitl:
+            _git_info(f"Branch '{branch_name}' already exists. Checking out... (--skip-hitl)")
+            subprocess.run(["git", "checkout", branch_name], check=True)
+        else:
+            logger.info("")
+            ans = input(f"  [git]  Branch '{branch_name}' already exists. Append commits to existing branch? [Y/n] ")
+            if ans.lower() not in ('', 'y', 'yes'):
+                _die("Aborted by user.")
+            subprocess.run(["git", "checkout", branch_name], check=True)
+    else:
+        _git_info(f"Creating and checking out new branch: {branch_name} from {base}")
+        subprocess.run(["git", "checkout", "-b", branch_name, base], check=True)
 
 def git_commit(files: list[Path], message: str) -> None:
     """Stage specific files and create an atomic git commit.
@@ -440,26 +506,26 @@ def hitl_gate(design_mmd: Path, spec_gherkin: Path) -> None:
         s = str(p)
         return ("..." + s[-(_max - 1):]) if len(s) > _max else s
 
-    print()
-    print("┌" + "─" * _W + "┐")
-    print("│  HUMAN-IN-THE-LOOP GATE (After Pass 0)                        │")
-    print("│  Review the design artefacts before any code is written.      │")
-    print("│" + " " * _W + "│")
-    print(f"│  1. Mermaid diagram  ->  {_fmt(design_mmd):<{_max}}│")
-    print(f"│  2. Gherkin spec     ->  {_fmt(spec_gherkin):<{_max}}│")
-    print("│" + " " * _W + "│")
-    print("│  Tip: VS Code + 'Mermaid Preview' extension to render .mmd    │")
-    print("│  Press Ctrl+C to abort -- no code will be written.             │")
-    print("└" + "─" * _W + "┘")
-    print()
+    logger.info("")
+    logger.info("┌" + "─" * _W + "┐")
+    logger.info("│  HUMAN-IN-THE-LOOP GATE (After Pass 0)                        │")
+    logger.info("│  Review the design artefacts before any code is written.      │")
+    logger.info("│" + " " * _W + "│")
+    logger.info(f"│  1. Mermaid diagram  ->  {_fmt(design_mmd):<{_max}}│")
+    logger.info(f"│  2. Gherkin spec     ->  {_fmt(spec_gherkin):<{_max}}│")
+    logger.info("│" + " " * _W + "│")
+    logger.info("│  Tip: VS Code + 'Mermaid Preview' extension to render .mmd    │")
+    logger.info("│  Press Ctrl+C to abort -- no code will be written.             │")
+    logger.info("└" + "─" * _W + "┘")
+    logger.info("")
 
     try:
         input("  Press Enter to approve and advance to Pass 1 (Contracts)...  ")
     except KeyboardInterrupt:
-        print("\n\n  Pipeline aborted at HITL gate.  No code was written.\n")
+        logger.info("\n\n  Pipeline aborted at HITL gate.  No code was written.\n")
         sys.exit(0)
 
-    print("\n  Design approved.  Continuing to Pass 1 (Contracts & Types)...\n")
+    logger.info("\n  Design approved.  Continuing to Pass 1 (Contracts & Types)...\n")
 
 
 # ---------------------------------------------------------------------------
@@ -477,7 +543,7 @@ def run_tests_with_capture(test_cmd: list[str]) -> tuple[bool, str]:
             - bool : True if the suite exited zero (all tests passed).
             - str  : Combined stdout + stderr.
     """
-    print(f"  Running: {' '.join(test_cmd)}\n")
+    logger.info(f"  Running: {' '.join(test_cmd)}\n")
 
     try:
         result = subprocess.run(
@@ -487,9 +553,9 @@ def run_tests_with_capture(test_cmd: list[str]) -> tuple[bool, str]:
         )
 
         if result.stdout:
-            print(result.stdout)
+            logger.debug(result.stdout)
         if result.stderr:
-            print(result.stderr, file=sys.stderr)
+            logger.debug(result.stderr)
 
         combined_output = result.stdout + "\n" + result.stderr
         return result.returncode == 0, combined_output
@@ -593,7 +659,7 @@ def run_pass_with_self_correction(
     #
     # The Static Prefix is enforced by build_opencode_command().
     # No error log file is attached yet because this is the first attempt.
-    print(f"\n  -> Invoking {agent} (initial run)...\n")
+    logger.info(f"\n  -> Invoking {agent} (initial run)...\n")
     initial_cmd = build_opencode_command(
         agent_name=agent,
         prompt=initial_prompt,
@@ -623,9 +689,9 @@ def run_pass_with_self_correction(
             # No agent ever inherits another pass's error history.
             if error_log_path.exists():
                 error_log_path.unlink()
-                print(f"  [compaction]  Deleted {error_log_path} -- context reset.\n")
+                logger.info(f"  [compaction]  Deleted {error_log_path} -- context reset.\n")
 
-            print(f"  ✓  Tests passed on attempt {human_attempt_num}/{total_attempts}.\n")
+            logger.info(f"  ✓  Tests passed on attempt {human_attempt_num}/{total_attempts}.\n")
             return
 
         # --- Tests failed ---
@@ -656,7 +722,7 @@ def run_pass_with_self_correction(
 
         # --- Still have retries -- trigger self-correction ---
         retries_remaining = max_retries - attempt_idx
-        print(
+        logger.info(
             f"\n  Tests FAILED (attempt {human_attempt_num}/{total_attempts}).\n"
             f"  Triggering self-correction -- {retries_remaining} "
             f"{'retry' if retries_remaining == 1 else 'retries'} remaining.\n"
@@ -674,7 +740,7 @@ def run_pass_with_self_correction(
         # an EXPLICIT artefact that the orchestrator can delete the
         # moment tests pass.  No implicit state leaks across passes.
         error_log_path.write_text(error_output, encoding="utf-8")
-        print(f"  [compaction]  Error log written to {error_log_path} ({len(error_output)} bytes)\n")
+        logger.info(f"  [compaction]  Error log written to {error_log_path} ({len(error_output)} bytes)\n")
 
         # Build the correction prompt.  Notice: the prompt does NOT
         # embed the raw test failure log.  It only instructs the agent
@@ -696,7 +762,7 @@ def run_pass_with_self_correction(
             f"  - Fix the ROOT CAUSE of the failure, not just the symptom."
         )
 
-        print(f"  -> Invoking {agent} (self-correction cycle {human_attempt_num}/{max_retries})...\n")
+        logger.info(f"  -> Invoking {agent} (self-correction cycle {human_attempt_num}/{max_retries})...\n")
 
         # The error log file is passed as an explicit `--file` argument
         # via build_opencode_command().  It sits AFTER the static prefix
@@ -759,6 +825,34 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--log-level",
+        dest="log_level",
+        metavar="LEVEL",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set the logging level (default: INFO)."
+    )
+
+    parser.add_argument(
+        "--issue",
+        dest="issue",
+        metavar="REF",
+        type=str,
+        default=None,
+        help="Issue reference (e.g., '123' or 'PAY-404') to auto-create and checkout a feature branch."
+    )
+
+    parser.add_argument(
+        "--base-branch",
+        dest="base_branch",
+        metavar="NAME",
+        type=str,
+        default=None,
+        help="Optional base branch to checkout from, bypassing the 'main' check (e.g., 'dev')."
+    )
+
+    parser.add_argument(
         "--test-cmd",
         dest="test_cmd",
         metavar="CMD",
@@ -801,6 +895,11 @@ def main() -> None:
     """
 
     args = _build_arg_parser().parse_args()
+
+    setup_logging(args.log_level)
+
+    if args.issue:
+        setup_feature_branch(args.issue, args.base_branch, args.skip_hitl)
 
     target: Path = args.target_file.resolve()
     target_dir: Path = target.parent
@@ -879,7 +978,7 @@ def main() -> None:
     if not args.skip_hitl:
         hitl_gate(design_mmd, spec_gherkin)
     else:
-        print("  [--skip-hitl]  Skipping human approval gate.\n")
+        logger.info("  [--skip-hitl]  Skipping human approval gate.\n")
 
     # ====================================================================
     # PASS 1 -- Contracts & Types  (deepseek-coder-v4)
@@ -1166,24 +1265,24 @@ def main() -> None:
         s = str(p)
         return ("..." + s[-(_max_path - 1):]) if len(s) > _max_path else s
 
-    print()
-    print("┌" + "─" * _W + "┐")
-    print(f"│  v{PIPELINE_VERSION} Pipeline complete -- all 8 passes ran successfully."
+    logger.info("")
+    logger.info("┌" + "─" * _W + "┐")
+    logger.info(f"│  v{PIPELINE_VERSION} Pipeline complete -- all 8 passes ran successfully."
           + " " * (_W - 59) + "│")
-    print("│" + " " * _W + "│")
-    print(f"│  Target file    : {_fp(target):<{_max_path}}│")
-    print("│" + " " * _W + "│")
-    print("│  Artefacts:" + " " * (_W - 11) + "│")
-    print(f"│    design.mmd   : {_fp(design_mmd):<{_max_path}}│")
-    print(f"│    spec.gherkin : {_fp(spec_gherkin):<{_max_path}}│")
-    print(f"│    test file    : {_fp(test_file):<{_max_path}}│")
-    print(f"│    source file  : {_fp(target):<{_max_path}}│")
-    print("│" + " " * _W + "│")
-    print("│  Git:  7 atomic commits created (Passes 1-7)." + " " * (_W - 47) + "│")
-    print("│  Next: git log --oneline  to review the commit trail." + " " * (_W - 54) + "│")
-    print("│        Open a PR when satisfied." + " " * (_W - 33) + "│")
-    print("└" + "─" * _W + "┘")
-    print()
+    logger.info("│" + " " * _W + "│")
+    logger.info(f"│  Target file    : {_fp(target):<{_max_path}}│")
+    logger.info("│" + " " * _W + "│")
+    logger.info("│  Artefacts:" + " " * (_W - 11) + "│")
+    logger.info(f"│    design.mmd   : {_fp(design_mmd):<{_max_path}}│")
+    logger.info(f"│    spec.gherkin : {_fp(spec_gherkin):<{_max_path}}│")
+    logger.info(f"│    test file    : {_fp(test_file):<{_max_path}}│")
+    logger.info(f"│    source file  : {_fp(target):<{_max_path}}│")
+    logger.info("│" + " " * _W + "│")
+    logger.info("│  Git:  7 atomic commits created (Passes 1-7)." + " " * (_W - 47) + "│")
+    logger.info("│  Next: git log --oneline  to review the commit trail." + " " * (_W - 54) + "│")
+    logger.info("│        Open a PR when satisfied." + " " * (_W - 33) + "│")
+    logger.info("└" + "─" * _W + "┘")
+    logger.info("")
 
 
 # ---------------------------------------------------------------------------
@@ -1194,7 +1293,7 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print(
+        logger.info(
             "\n\n  Pipeline interrupted by user.\n"
             "  Partial changes may exist -- run:  git diff\n"
             "  To resume from a specific pass, re-run with --skip-hitl.\n"
@@ -1202,10 +1301,10 @@ if __name__ == "__main__":
         sys.exit(0)
     except subprocess.CalledProcessError as exc:
         cmd_str = " ".join(str(a) for a in exc.cmd)
-        print(
+        logger.error(
             f"\n[FATAL]  opencode exited with code {exc.returncode}.\n"
             f"  Command: {cmd_str}\n"
             f"  Check the terminal output above for details.\n",
-            file=sys.stderr,
+            
         )
         sys.exit(1)

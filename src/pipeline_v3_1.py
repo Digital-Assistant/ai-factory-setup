@@ -57,6 +57,7 @@ Prerequisites
 
 import argparse
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -364,8 +365,66 @@ def run_opencode(cmd: list[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Git integration -- atomic commits
+# Git integration -- atomic commits & branching
 # ---------------------------------------------------------------------------
+
+def get_current_branch() -> str:
+    result = subprocess.run(["git", "branch", "--show-current"], capture_output=True, text=True)
+    return result.stdout.strip()
+
+def is_working_directory_dirty() -> bool:
+    result = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
+    return bool(result.stdout.strip())
+
+def branch_exists(branch_name: str) -> bool:
+    result = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"])
+    return result.returncode == 0
+
+def ensure_branch_is_synced(branch_name: str) -> None:
+    _git_info(f"Fetching latest from origin...")
+    subprocess.run(["git", "fetch", "-q"], check=False)
+
+def sanitize_to_git_branch(issue_ref: str) -> str:
+    s = str(issue_ref).lower()
+    s = re.sub(r'[^a-z0-9]+', '-', s).strip('-')
+    if s.isdigit():
+        return f"ai/issue-{s}"
+    return f"feat/{s}"
+
+def setup_feature_branch(issue_ref: str, base_branch: str | None, skip_hitl: bool) -> None:
+    """Resolve base branch and checkout a new feature branch for the pipeline."""
+    if not shutil.which("git"):
+        _warn(["git not found on PATH -- skipping branch setup."])
+        return
+
+    if is_working_directory_dirty():
+        _die("Working directory is dirty. Please commit or stash your changes before running the pipeline.")
+        
+    current = get_current_branch()
+    if base_branch:
+        base = base_branch
+    else:
+        if current == "main":
+            _die("Hygiene Error: Cannot automatically branch from 'main'. Please switch to a working branch or use --base-branch override.")
+        base = current
+        
+    ensure_branch_is_synced(base)
+    
+    branch_name = sanitize_to_git_branch(issue_ref)
+    
+    if branch_exists(branch_name):
+        if skip_hitl:
+            _git_info(f"Branch '{branch_name}' already exists. Checking out... (--skip-hitl)")
+            subprocess.run(["git", "checkout", branch_name], check=True)
+        else:
+            print()
+            ans = input(f"  [git]  Branch '{branch_name}' already exists. Append commits to existing branch? [Y/n] ")
+            if ans.lower() not in ('', 'y', 'yes'):
+                _die("Aborted by user.")
+            subprocess.run(["git", "checkout", branch_name], check=True)
+    else:
+        _git_info(f"Creating and checking out new branch: {branch_name} from {base}")
+        subprocess.run(["git", "checkout", "-b", branch_name, base], check=True)
 
 def git_commit(files: list[Path], message: str) -> None:
     """Stage specific files and create an atomic git commit.
@@ -759,6 +818,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--issue",
+        dest="issue",
+        metavar="REF",
+        type=str,
+        default=None,
+        help="Issue reference (e.g., '123' or 'PAY-404') to auto-create and checkout a feature branch."
+    )
+
+    parser.add_argument(
+        "--base-branch",
+        dest="base_branch",
+        metavar="NAME",
+        type=str,
+        default=None,
+        help="Optional base branch to checkout from, bypassing the 'main' check (e.g., 'dev')."
+    )
+
+    parser.add_argument(
         "--test-cmd",
         dest="test_cmd",
         metavar="CMD",
@@ -801,6 +878,9 @@ def main() -> None:
     """
 
     args = _build_arg_parser().parse_args()
+
+    if args.issue:
+        setup_feature_branch(args.issue, args.base_branch, args.skip_hitl)
 
     target: Path = args.target_file.resolve()
     target_dir: Path = target.parent
